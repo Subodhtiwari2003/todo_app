@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>To-Do List App</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+       .task-card { border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; border-radius: 5px; }
+       .form-group { margin-bottom: 10px; }
+        input, textarea, select { width: 100%; padding: 8px; margin-top: 5px; }
+        button { background-color: #28a745; color: white; padding: 10px 15px; border: none; cursor: pointer; }
+       .delete-btn { background-color: #dc3545; float: right; }
+    </style>
+</head>
+<body>
+
+    <h1>My To-Do List</h1>
+
+    <div style="background-color: #f9f9f9; padding: 20px; margin-bottom: 20px;">
+        <h3>Add New Task</h3>
+        <form id="taskForm">
+            <div class="form-group">
+                <input type="text" id="title" placeholder="Task Title" required>
+            </div>
+            <div class="form-group">
+                <textarea id="description" placeholder="Description"></textarea>
+            </div>
+            <div class="form-group">
+                <input type="date" id="due_date">
+            </div>
+            <button type="submit">Add Task</button>
+        </form>
+    </div>
+
+    <div id="taskList">
+        {% for task in tasks %}
+        <div class="task-card" id="task-{{ task.id }}">
+            <button class="delete-btn" onclick="deleteTask({{ task.id }})">Delete</button>
+            <strong>{{ task.title }}</strong> ({{ task.status }})
+            <p>{{ task.description }}</p>
+            <small>Due: {{ task.due_date }}</small>
+        </div>
+        {% endfor %}
+    </div>
+
+    <script>
+        // Handle Form Submission via API
+        document.getElementById('taskForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const taskData = {
+                title: document.getElementById('title').value,
+                description: document.getElementById('description').value,
+                due_date: document.getElementById('due_date').value,
+                status: "Pending"
+            };
+
+            const response = await fetch('/api/tasks', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(taskData)
+            });
+
+            if (response.ok) {
+                window.location.reload(); // Simple reload to show new task
+            } else {
+                alert("Failed to add task");
+            }
+        });
+
+        // Handle Delete via API
+        async function deleteTask(id) {
+            if(!confirm("Are you sure?")) return;
+
+            const response = await fetch(`/api/tasks/${id}`, {
+                method: 'DELETE'
+            });
+
+            if (response.ok) {
+                document.getElementById(`task-${id}`).remove();
+            } else {
+                alert("Error deleting task");
+            }
+        }
+    </script>
+</body>
+</html>
