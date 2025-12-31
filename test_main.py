@@ -1,194 +1,122 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from typing import Optional
-from contextlib import contextmanager, asynccontextmanager
+import pytest
+from fastapi.testclient import TestClient
+from main import app, init_db
 import sqlite3
+import os
 
-# Database Configuration
-DATABASE = "todo.db"
+# Use a separate test database
+TEST_DATABASE = "test_todo.db"
 
-# Pydantic Models
-class TaskModel(BaseModel):
-    title: str
-    description: Optional[str] = None
-    due_date: Optional[str] = None
-    status: str = "Pending"
-
-class TaskResponse(BaseModel):
-    id: int
-    title: str
-    description: Optional[str]
-    due_date: Optional[str]
-    status: str
-
-class TaskUpdate(BaseModel):
-    status: str
-
-# Database Helper Functions
-@contextmanager
-def get_db_connection():
-    """Context manager for database connections"""
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-def init_db():
-    """Initialize database and create tables"""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                description TEXT,
-                status TEXT DEFAULT 'Pending',
-                due_date TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
-
-# Lifespan event handler (replaces deprecated on_event)
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
+@pytest.fixture(scope="function")
+def test_db():
+    """Create a fresh test database for each test"""
+    # Override the database name
+    import main
+    main.DATABASE = TEST_DATABASE
+    
+    # Initialize the database
     init_db()
+    
     yield
-    # Shutdown (if needed)
+    
+    # Cleanup: remove the test database after each test
+    if os.path.exists(TEST_DATABASE):
+        os.remove(TEST_DATABASE)
 
-# FastAPI App
-app = FastAPI(lifespan=lifespan)
+@pytest.fixture
+def client(test_db):
+    """Create a test client"""
+    return TestClient(app)
 
-# CORS Middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def test_create_task(client):
+    """Test creating a new task"""
+    response = client.post("/api/tasks", json={
+        "title": "Test Task",
+        "description": "Testing Description",
+        "status": "Pending",
+        "due_date": "2023-12-31"
+    })
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["title"] == "Test Task"
+    assert data["description"] == "Testing Description"
+    assert data["status"] == "Pending"
+    assert data["due_date"] == "2023-12-31"
+    assert "id" in data
 
-# API Endpoints
-@app.post("/api/tasks", response_model=TaskResponse)
-def create_task(task: TaskModel):
-    """Create a new task"""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO tasks (title, description, status, due_date) VALUES (?,?,?,?)",
-            (task.title, task.description, task.status, task.due_date)
-        )
-        task_id = cursor.lastrowid
-        
-        # Fetch the created task
-        cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
-        row = cursor.fetchone()
-        
-        return {
-            "id": row["id"],
-            "title": row["title"],
-            "description": row["description"],
-            "due_date": row["due_date"],
-            "status": row["status"]
-        }
+def test_read_tasks(client):
+    """Test retrieving all tasks"""
+    # Create a task first
+    client.post("/api/tasks", json={
+        "title": "Test Task 1",
+        "description": "Description 1"
+    })
+    
+    # Get all tasks
+    response = client.get("/api/tasks")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+    assert len(data) >= 1
+    assert data[0]["title"] == "Test Task 1"
 
-@app.get("/api/tasks", response_model=list[TaskResponse])
-def get_tasks():
-    """Retrieve all tasks"""
-    with get_db_connection() as conn:
-        cursor = conn.execute("SELECT * FROM tasks ORDER BY id DESC")
-        tasks = cursor.fetchall()
-        
-        return [
-            {
-                "id": task["id"],
-                "title": task["title"],
-                "description": task["description"],
-                "due_date": task["due_date"],
-                "status": task["status"]
-            }
-            for task in tasks
-        ]
+def test_get_single_task(client):
+    """Test retrieving a single task"""
+    # Create a task
+    create_response = client.post("/api/tasks", json={
+        "title": "Single Task",
+        "description": "Single Description"
+    })
+    task_id = create_response.json()["id"]
+    
+    # Get the task
+    response = client.get(f"/api/tasks/{task_id}")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == task_id
+    assert data["title"] == "Single Task"
 
-@app.get("/api/tasks/{task_id}", response_model=TaskResponse)
-def get_task(task_id: int):
-    """Retrieve a specific task"""
-    with get_db_connection() as conn:
-        cursor = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
-        task = cursor.fetchone()
-        
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-        
-        return {
-            "id": task["id"],
-            "title": task["title"],
-            "description": task["description"],
-            "due_date": task["due_date"],
-            "status": task["status"]
-        }
+def test_update_task_status(client):
+    """Test updating task status"""
+    # Create a task
+    create_response = client.post("/api/tasks", json={
+        "title": "Task to Update"
+    })
+    task_id = create_response.json()["id"]
+    
+    # Update status
+    response = client.patch(f"/api/tasks/{task_id}", json={
+        "status": "Completed"
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "Completed"
 
-@app.patch("/api/tasks/{task_id}", response_model=TaskResponse)
-def update_task_status(task_id: int, task_update: TaskUpdate):
-    """Update task status"""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        
-        # Check if task exists
-        cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail="Task not found")
-        
-        # Update status
-        cursor.execute(
-            "UPDATE tasks SET status = ? WHERE id = ?",
-            (task_update.status, task_id)
-        )
-        
-        # Fetch updated task
-        cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
-        task = cursor.fetchone()
-        
-        return {
-            "id": task["id"],
-            "title": task["title"],
-            "description": task["description"],
-            "due_date": task["due_date"],
-            "status": task["status"]
-        }
+def test_delete_task(client):
+    """Test deleting a task"""
+    # Create a task
+    create_response = client.post("/api/tasks", json={
+        "title": "Delete Me"
+    })
+    task_id = create_response.json()["id"]
+    
+    # Delete the task
+    response = client.delete(f"/api/tasks/{task_id}")
+    assert response.status_code == 200
+    assert response.json()["message"] == "Task deleted successfully"
+    
+    # Verify it's deleted
+    get_response = client.get(f"/api/tasks/{task_id}")
+    assert get_response.status_code == 404
 
-@app.delete("/api/tasks/{task_id}")
-def delete_task(task_id: int):
-    """Delete a task"""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        
-        # Check if task exists
-        cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail="Task not found")
-        
-        # Delete task
-        cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-        
-        return {"message": "Task deleted successfully"}
+def test_task_not_found(client):
+    """Test 404 for non-existent task"""
+    response = client.get("/api/tasks/9999")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Task not found"
 
-# Serve static files and HTML
-@app.get("/")
-def read_root():
-    """Serve the main HTML page"""
-    return FileResponse("index.html")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+def test_delete_nonexistent_task(client):
+    """Test deleting non-existent task"""
+    response = client.delete("/api/tasks/9999")
+    assert response.status_code == 404
