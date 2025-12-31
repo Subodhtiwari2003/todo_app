@@ -1,87 +1,194 @@
-from fastapi import FastAPI, HTTPException, Request, Form
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.templating import Jinja2Templates
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
-from database import get_db_connection, init_db
+from contextlib import contextmanager, asynccontextmanager
+import sqlite3
 
-# Initialize App and DB
-app = FastAPI(title="To-Do List API", description="Raw SQL CRUD API")
-templates = Jinja2Templates(directory="templates")
+# Database Configuration
+DATABASE = "todo.db"
 
-# Run DB initialization on startup
-@app.on_event("startup")
-def startup():
-    init_db()
-
-# --- Pydantic Models for Data Validation ---
+# Pydantic Models
 class TaskModel(BaseModel):
     title: str
     description: Optional[str] = None
     due_date: Optional[str] = None
-    status: Optional[str] = "Pending"
+    status: str = "Pending"
 
-class TaskResponse(TaskModel):
+class TaskResponse(BaseModel):
     id: int
+    title: str
+    description: Optional[str]
+    due_date: Optional[str]
+    status: str
 
-# --- API ENDPOINTS (CRUD) ---
+class TaskUpdate(BaseModel):
+    status: str
 
+# Database Helper Functions
+@contextmanager
+def get_db_connection():
+    """Context manager for database connections"""
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def init_db():
+    """Initialize database and create tables"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT DEFAULT 'Pending',
+                due_date TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+
+# Lifespan event handler (replaces deprecated on_event)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    init_db()
+    yield
+    # Shutdown (if needed)
+
+# FastAPI App
+app = FastAPI(lifespan=lifespan)
+
+# CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# API Endpoints
 @app.post("/api/tasks", response_model=TaskResponse)
 def create_task(task: TaskModel):
-    """Create a new task using Raw SQL"""
+    """Create a new task"""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO tasks (title, description, status, due_date) VALUES (?,?,?,?)",
             (task.title, task.description, task.status, task.due_date)
         )
-        conn.commit()
-        new_id = cursor.lastrowid
-        return {**task.dict(), "id": new_id}
+        task_id = cursor.lastrowid
+        
+        # Fetch the created task
+        cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        row = cursor.fetchone()
+        
+        return {
+            "id": row["id"],
+            "title": row["title"],
+            "description": row["description"],
+            "due_date": row["due_date"],
+            "status": row["status"]
+        }
 
-@app.get("/api/tasks", response_model=list)
+@app.get("/api/tasks", response_model=list[TaskResponse])
 def get_tasks():
     """Retrieve all tasks"""
     with get_db_connection() as conn:
-        cursor = conn.execute("SELECT * FROM tasks")
+        cursor = conn.execute("SELECT * FROM tasks ORDER BY id DESC")
         tasks = cursor.fetchall()
-        # Convert sqlite3.Row objects to dicts
-        return [dict(row) for row in tasks]
+        
+        return [
+            {
+                "id": task["id"],
+                "title": task["title"],
+                "description": task["description"],
+                "due_date": task["due_date"],
+                "status": task["status"]
+            }
+            for task in tasks
+        ]
 
-@app.put("/api/tasks/{task_id}", response_model=TaskResponse)
-def update_task(task_id: int, task: TaskModel):
-    """Update a task"""
+@app.get("/api/tasks/{task_id}", response_model=TaskResponse)
+def get_task(task_id: int):
+    """Retrieve a specific task"""
     with get_db_connection() as conn:
-        # Check if exists first
-        check = conn.execute("SELECT id FROM tasks WHERE id =?", (task_id,)).fetchone()
-        if not check:
+        cursor = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        task = cursor.fetchone()
+        
+        if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-            
-        conn.execute(
-            "UPDATE tasks SET title=?, description=?, status=?, due_date=? WHERE id=?",
-            (task.title, task.description, task.status, task.due_date, task_id)
+        
+        return {
+            "id": task["id"],
+            "title": task["title"],
+            "description": task["description"],
+            "due_date": task["due_date"],
+            "status": task["status"]
+        }
+
+@app.patch("/api/tasks/{task_id}", response_model=TaskResponse)
+def update_task_status(task_id: int, task_update: TaskUpdate):
+    """Update task status"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Check if task exists
+        cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        # Update status
+        cursor.execute(
+            "UPDATE tasks SET status = ? WHERE id = ?",
+            (task_update.status, task_id)
         )
-        conn.commit()
-        return {**task.dict(), "id": task_id}
+        
+        # Fetch updated task
+        cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        task = cursor.fetchone()
+        
+        return {
+            "id": task["id"],
+            "title": task["title"],
+            "description": task["description"],
+            "due_date": task["due_date"],
+            "status": task["status"]
+        }
 
 @app.delete("/api/tasks/{task_id}")
 def delete_task(task_id: int):
     """Delete a task"""
     with get_db_connection() as conn:
-        cursor = conn.execute("DELETE FROM tasks WHERE id =?", (task_id,))
-        conn.commit()
-        if cursor.rowcount == 0:
+        cursor = conn.cursor()
+        
+        # Check if task exists
+        cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        if not cursor.fetchone():
             raise HTTPException(status_code=404, detail="Task not found")
+        
+        # Delete task
+        cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        
         return {"message": "Task deleted successfully"}
 
-# --- WEB INTERFACE ROUTES ---
+# Serve static files and HTML
+@app.get("/")
+def read_root():
+    """Serve the main HTML page"""
+    return FileResponse("index.html")
 
-@app.get("/", response_class=HTMLResponse)
-def read_root(request: Request):
-    """Render the HTML template with the list of tasks"""
-    # Fetch tasks directly to render the initial page server-side
-    with get_db_connection() as conn:
-        cursor = conn.execute("SELECT * FROM tasks")
-        tasks = [dict(row) for row in cursor.fetchall()]
-    return templates.TemplateResponse("index.html", {"request": request, "tasks": tasks})
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
