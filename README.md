@@ -1,2 +1,4 @@
 #  Todo App
 A simple and efficient Todo Application built with Python to manage daily tasks. This project demonstrates clean code practices, modular design, and serves as a foundation for building more advanced task management systems.
+
+# Features
