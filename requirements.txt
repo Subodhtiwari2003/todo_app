@@ -4,4 +4,4 @@ pydantic
 sqlalchemy
 jinja2
 httpx
-pytest
+pyt
